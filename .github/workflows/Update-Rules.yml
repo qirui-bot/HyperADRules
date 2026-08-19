@@ -1,0 +1,107 @@
+name: Update Rules
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '47 */4 * * *'
+
+# 【优化 1】增加并发控制：防止定时任务和手动点击同时运行导致 Git 冲突崩溃
+concurrency:
+  group: update-rules-group
+  cancel-in-progress: true
+
+# 【优化 2】全局权限声明：解决 403 Permission denied 和删除记录报错
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          # 调用你在 Secrets 中配置的 Token，确保有拉取和推送权限
+          token: ${{ secrets.TOKENS }}
+          fetch-depth: 1
+
+      - name: Update Rules
+        continue-on-error: true
+        run: |
+          # 执行原有的 Bash 脚本，下载并初步合并规则
+          bash ./data/script/update-rules.sh
+
+      # ================= 【新增步骤：自定义规则注入】 =================
+      # 原 custom_inject.yml 的逻辑被内嵌到这里。
+      # 放在 update-rules.sh 之后、死链检查之前，
+      # 确保自定义规则参与后续死链检查、去重、统计和 README 更新。
+      - name: Setup Python for custom rules injection
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - name: Inject custom rules
+        continue-on-error: true
+        run: |
+          pip install requests
+
+          # 如果仓库根目录存在 custom_rules_injector.py，则执行注入
+          if [ -f "custom_rules_injector.py" ]; then
+            echo "开始注入自定义规则"
+            python custom_rules_injector.py
+          else
+            echo "未找到 custom_rules_injector.py，跳过自定义规则注入"
+          fi
+
+          # 注意：这里不要单独 git commit / git push。
+          # 自定义规则写入 rules.txt / dns.txt / allow.txt 等文件后，
+          # 会交给后续 Dead Link Check & Visualization 统一清洗，
+          # 最后由原来的 Git push 步骤统一提交。
+      # =================================================================
+
+      # ================= 【原有步骤】 =================
+      # 【核心】死链检查、去重与可视化体检
+      # 此时 custom_rules_injector.py 已经将自定义规则写入规则文件，
+      # 所以自定义规则会一起参与死链检查和去重。
+      - name: Dead Link Check & Visualization
+        run: |
+          # 1. 安装死链并发检查所需的 Python 依赖库
+          pip install dnspython tqdm
+
+          # 2. 执行可视化与清洗脚本
+          python ./data/python/visualize_and_clean.py
+
+      - name: Update ReadMe
+        run: |
+          # 此时 visualize_and_clean.py 已经修正了文件头的 ! Total count:
+          # clean-readme.sh 将抓取到剔除死链和二次去重后最真实的存活规则数量
+          bash ./data/script/clean-readme.sh
+
+      # 【优化 3】解决 Git 仓库体积“无限膨胀”问题
+      - name: Git push assets to Github
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+          # --all 会自动将新生成的压缩缓存文件 dns_cache.json.gz 加入提交
+          # 同时也会包含自定义规则注入后产生的所有规则文件变更
+          git add --all
+
+          # 检查是否有文件更改，避免空 commit 导致报错
+          if ! git diff --staged --quiet; then
+            # 核心优化：使用 --amend 覆盖上一次的 commit 记录
+            # 这样你的仓库历史永远只有 1 条提交记录，彻底杜绝仓库体积无限膨胀！
+            git commit --amend --no-edit -m "Updated at $(TZ=UTC-8 date +'%Y-%m-%d %H:%M:%S')（北京时间）"
+            git push -u origin HEAD:master -f
+          else
+            echo "✅ 规则无变化，跳过提交"
+          fi
+
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          token: ${{ secrets.TOKENS }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 0
