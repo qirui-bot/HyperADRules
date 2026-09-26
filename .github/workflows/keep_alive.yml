@@ -1,0 +1,52 @@
+name: Auto Keep Alive (Beijing Time)
+on:
+  schedule:
+    # 每 2 小时的第 37 分执行
+    - cron: "37 */2 * * *"
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          # ⚠️ 必须使用 GH_PAT，否则 push 不会刷新仓库活跃度
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0 # 获取完整历史，防止 push 报错
+          
+      - name: Update heartbeat with Beijing Time
+        run: |
+          # 1. 设置时区为北京时间
+          export TZ='Asia/Shanghai'
+          CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
+          echo "👉 Current Beijing Time: $CURRENT_TIME"
+          
+          # 2. 写入心跳文件
+          echo "Last heartbeat (Beijing Time): $CURRENT_TIME" > heartbeat.txt
+          
+          # 3. 配置 Git 用户信息
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # 4. 添加文件到暂存区
+          git add heartbeat.txt
+          
+          # 5. 提交更改 (因为每次时间精确到秒，内容必定改变，无需复杂的 diff 检查)
+          git commit -m "chore: keep repo alive (Beijing Time) - $CURRENT_TIME"
+          
+          # 6. 获取当前分支名并推送 (自动适配 main 或 master 分支)
+          BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+          echo "🚀 Pushing to branch: $BRANCH_NAME"
+          
+          # 【修复 Bug 2】加上 --force 参数，防止与主 Workflow 并发时因历史不一致导致 push 被拒绝标红
+          # 原因：主 Workflow 使用 --amend + force push，会改变远程历史
+          # 如果不加 --force，keep_alive 的普通 push 会被 GitHub 拒绝，导致 workflow 标红报错
+          # 加上 --force 后，即使远程历史已变，也能强制覆盖，保证保活任务顺利执行
+          git push origin "$BRANCH_NAME" --force
+          
+          echo "✅ Heartbeat updated and pushed successfully!"
